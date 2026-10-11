@@ -1,0 +1,48 @@
+export const resourceTypes = ['sources', 'mentions', 'alerts', 'publications', 'contacts', 'reports', 'rules', 'crises', 'profile', 'settings', 'appointments', 'campaigns', 'threats', 'monitors', 'subscriptions', 'keywords'] as const;
+export type ResourceType = typeof resourceTypes[number];
+export interface Entity {
+  id: string;
+  type: ResourceType;
+  name: string;
+  description?: string;
+  status?: string;
+  platform?: string;
+  category?: string;
+  sentiment?: string;
+  score?: number;
+  count?: number;
+  growth?: number;
+  author?: string;
+  date?: string;
+  time?: string;
+  url?: string;
+  email?: string;
+  phone?: string;
+  role?: string;
+  company?: string;
+  country?: string;
+  city?: string;
+  languages?: string;
+  domain?: string;
+  severity?: string;
+  assignee?: string;
+  views?: string;
+  likes?: number;
+  comments?: number;
+  image?: string;
+  notes?: string;
+  progress?: number;
+  active?: boolean;
+  emailAlerts?: boolean;
+  pushAlerts?: boolean;
+  digest?: boolean;
+  term?: string;
+  platforms?: string[];
+  [key: string]: string | number | boolean | string[] | undefined;
+}
+export type WorkspaceData = Record<ResourceType, Entity[]>;
+export interface AppUser { id: string; name: string; email: string; demo: boolean; }
+export const sectionLabels: Record<string, string> = {
+  dashboard: 'Tableau de bord', profil: 'Profil de la personnalité', sources: 'Sources de surveillance', mentions: 'Mentions & Analyse', analyse: 'Analyse IA', alertes: 'Gestion des alertes', crise: 'Gestion de crise', contenus: 'Contenus & publications', medias: 'Relations médias', rapports: 'Rapports & statistiques', protection: 'Protection de l’identité', parametres: 'Paramètres', premium: 'Changer de plan',
+};
+export const formatNumber = (n: number) => new Intl.NumberFormat('fr-FR').format(n);

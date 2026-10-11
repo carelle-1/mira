@@ -1,0 +1,7 @@
+{
+  "dialect": "mysql",
+  "schema": "./src/db/schema.ts",
+  "dbCredentials": {
+    "url": "mysql://root:@127.0.0.1:3306/ereputation1"
+  }
+}
