@@ -19,6 +19,7 @@ interface FacebookPage {
   accountId: string;
   accountName: string;
   active: boolean;
+  userToken?: boolean;
 }
 
 interface FacebookStatus {
@@ -56,7 +57,7 @@ const fieldStyle: React.CSSProperties = { display: 'grid', gap: 7 };
 const inputStyle: React.CSSProperties = { width: '100%', minHeight: 42, padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border, #344451)', background: 'var(--surface, #101a22)', color: 'inherit', font: 'inherit' };
 
 export function SettingsView() {
-  const { data, user, notify, refresh, navigate, edit, remove } = useWorkspace();
+  const { data, user, notify, refresh, navigate, edit, remove, save } = useWorkspace();
   const searchParams = useSearchParams();
   const initialTab = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState<SettingsTab>(tabs.some(tab => tab.id === initialTab) ? initialTab as SettingsTab : 'account');
@@ -70,9 +71,26 @@ export function SettingsView() {
   const [totpUri, setTotpUri] = useState('');
   const [accountBusy, setAccountBusy] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [searchBusy, setSearchBusy] = useState(false);
   const profile = data.profile[0];
   const preferences = data.settings[0];
   const subscription = data.subscriptions[0];
+  const veilleEnabled = {
+    facebook: preferences?.veilleFacebook !== false,
+    'google-news': preferences?.veilleGoogleNews !== false,
+    youtube: preferences?.veilleYoutube !== false,
+    reddit: preferences?.veilleReddit !== false,
+    rss: preferences?.veilleRss !== false,
+  };
+  const rssFeeds = data.sources.filter(source => source.platform === 'rss');
+  const sourceStatusLine = (sourceId: string) => {
+    const last = preferences?.[`veilleLastAt_${sourceId}`];
+    const error = preferences?.[`veilleError_${sourceId}`];
+    const label = typeof last === 'string' && last
+      ? `Dernière collecte : ${new Date(last).toLocaleString('fr-FR')}`
+      : 'Aucune collecte effectuée pour le moment.';
+    return typeof error === 'string' && error ? `${label} — erreur : ${error}` : label;
+  };
   const [accountEdits, setAccountEdits] = useState<Partial<{ name: string; email: string; phone: string; city: string }>>({});
   const account = { name: accountEdits.name ?? profile?.name ?? user.name, email: accountEdits.email ?? profile?.email ?? user.email, phone: accountEdits.phone ?? profile?.phone ?? '', city: accountEdits.city ?? profile?.city ?? '' };
 
@@ -252,6 +270,66 @@ export function SettingsView() {
     }
   }
 
+  async function toggleVeille(field: 'veilleFacebook' | 'veilleGoogleNews' | 'veilleYoutube' | 'veilleReddit' | 'veilleRss', label: string) {
+    const nextValue = preferences?.[field] === false;
+    const settingsRow = data.settings[0];
+    setSearchBusy(true);
+    try {
+      // L'id force la branche PATCH (fusion) : sans id, handleResource créerait
+      // une seconde ligne settings (rejetée par la validation name/term).
+      await save('settings', { name: settingsRow?.name || 'Préférences du compte', [field]: nextValue }, settingsRow?.id);
+      notify(`${label} ${nextValue ? 'activé(e)' : 'désactivé(e)'} : la collecte par mots-clés se relancera automatiquement toutes les 15 minutes.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Impossible de mettre à jour la source de veille.', true);
+    } finally {
+      setSearchBusy(false);
+    }
+  }
+
+  async function saveVeilleOption(field: 'veilleNewsLang' | 'veilleNewsCountry', value: string) {
+    const settingsRow = data.settings[0];
+    try {
+      await save('settings', { name: settingsRow?.name || 'Préférences du compte', [field]: value }, settingsRow?.id);
+      notify('Réglage enregistré. La prochaine collecte utilisera cette valeur.');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Impossible d’enregistrer ce réglage.', true);
+    }
+  }
+
+interface VeilleScanResult {
+  added?: number;
+  checked?: number;
+  keywords?: number;
+  reason?: string;
+  error?: string;
+  warnings?: string[];
+  sources?: { label: string; added: number }[];
+}
+
+async function launchVeille() {
+  setSearchBusy(true);
+  try {
+    const response = await fetch('/api/mentions/scan', { method: 'POST' });
+    const result = (await response.json()) as VeilleScanResult;
+    if (!response.ok) throw new Error(result.error || 'La recherche multi-sources a échoué.');
+    await refresh();
+    if (result.reason === 'no_keywords') {
+      notify('Ajoutez au moins un mot-clé actif dans l’onglet Mots-clés pour lancer la collecte.', true);
+    } else if (result.added && result.added > 0) {
+      const sources = (result.sources || []).filter(s => s.added > 0).map(s => s.label).join(', ');
+      notify(`${result.added} nouvelle(s) mention(s) enregistrée(s) à partir de ${result.keywords ?? 0} mot(s)-clé(s)${sources ? ` via ${sources}` : ''}.`);
+    } else if (result.warnings?.length) {
+      notify(`Aucune nouvelle mention. ${result.checked ?? 0} contenu(s) analysé(s). ${result.warnings[0]}`, true);
+    } else {
+      notify(`Aucune nouvelle mention. ${result.checked ?? 0} contenu(s) analysé(s) sur toutes les sources activées.`);
+    }
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'La recherche multi-sources a échoué.', true);
+  } finally {
+    setSearchBusy(false);
+  }
+}
+
   async function securityAction(action: 'setup' | 'enable' | 'disable' | 'revoke', id?: string) {
     setSecurityBusy(true);
     try {
@@ -317,10 +395,12 @@ export function SettingsView() {
       >
         {facebookStatus.accounts.map(page => <option key={page.accountId} value={page.accountId}>{page.accountName}</option>)}
       </Select>}
-      {facebookStatus.connected
-        ? <Button onClick={() => void facebookDisconnect()} busy={facebookBusy}>Déconnecter</Button>
+      {facebookStatus.connected ? <Button onClick={() => void facebookDisconnect()} busy={facebookBusy}>Déconnecter</Button>
         : <Button variant="primary" icon="facebook" onClick={() => void facebookConnect()} busy={facebookBusy}>Connecter Facebook</Button>}
     </div>
+    {facebookStatus.connected && <p style={{ margin: '12px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+      La recherche publique sur Facebook n’est pas disponible. Seules les publications, commentaires et mentions de votre Page sont analysés. Les autres sources web complètent la veille par mots-clés.
+    </p>}
   </Panel>;
 
   const notificationItems = useMemo(() => [
@@ -379,11 +459,73 @@ export function SettingsView() {
         </div>}
 
         {activeTab === 'integrations' && <div style={sectionStyle}>{linkedinCard}{facebookCard}<Panel title="Autres intégrations" icon="puzzle"><p style={{ margin: 0, color: 'var(--muted, #9aa9b5)' }}>De nouvelles plateformes seront disponibles prochainement.</p></Panel></div>}
-
-        {activeTab === 'keywords' && <Panel title="Mots-clés surveillés" icon="tag" action={<Button variant="primary" icon="plus" onClick={() => edit('keywords')}>Ajouter un mot-clé</Button>}>
-          {data.keywords.length ? data.keywords.map(keyword => <div key={keyword.id} style={rowStyle}><div><strong>{keyword.term || keyword.name}</strong><p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{(keyword.platforms || []).join(' · ') || 'Toutes les plateformes'}</p></div><div style={{ display: 'flex', gap: 8 }}><Button onClick={() => edit('keywords', keyword)}>Modifier</Button><Button onClick={() => void remove(keyword)}>Supprimer</Button></div></div>) : <p>Aucun mot-clé n’est encore surveillé.</p>}
-        </Panel>}
-
+        {activeTab === 'keywords' && <div style={sectionStyle}>
+          <Panel title="Sources de veille" icon="radar" action={<Button variant="primary" icon="play" busy={searchBusy} onClick={() => void launchVeille()}>Lancer la recherche maintenant</Button>}>
+            <div style={rowStyle}>
+              <div>
+                <strong>Facebook — Page connectée</strong>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+                  Publications, commentaires et publications taguées de votre Page. La recherche publique sur les autres Pages Facebook n’est pas disponible (limite Meta) ; les autres sources complètent la veille.
+                </p>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{sourceStatusLine('facebook')}</p>
+              </div>
+              <Toggle checked={veilleEnabled.facebook} label="Facebook" disabled={searchBusy} onChange={() => void toggleVeille('veilleFacebook', 'La source Facebook')} />
+            </div>
+            <div style={rowStyle}>
+              <div style={{ flex: '1 1 260px' }}>
+                <strong>Google News</strong>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+                  Articles de presse correspondant à vos mots-clés. Aucune clé API requise.
+                </p>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{sourceStatusLine('google-news')}</p>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, flexWrap: 'wrap' }}>
+                {labeledField('Langue', <Select value={String(preferences?.veilleNewsLang || 'fr')} onChange={event => void saveVeilleOption('veilleNewsLang', event.target.value)}><option value="fr">Français</option><option value="en">English</option></Select>)}
+                {labeledField('Pays', <Select value={String(preferences?.veilleNewsCountry || 'CM')} onChange={event => void saveVeilleOption('veilleNewsCountry', event.target.value)}><option value="CM">Cameroun</option><option value="FR">France</option><option value="BE">Belgique</option><option value="CA">Canada</option><option value="SN">Sénégal</option><option value="CI">Côte d’Ivoire</option><option value="US">États-Unis</option></Select>)}
+                <Toggle checked={veilleEnabled['google-news']} label="Google News" disabled={searchBusy} onChange={() => void toggleVeille('veilleGoogleNews', 'La source Google News')} />
+              </div>
+            </div>
+            <div style={rowStyle}>
+              <div>
+                <strong>YouTube</strong>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+                  Vidéos correspondant à vos mots-clés (API YouTube : quota limité, une collecte par heure).
+                </p>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{sourceStatusLine('youtube')}</p>
+              </div>
+              <Toggle checked={veilleEnabled.youtube} label="YouTube" disabled={searchBusy} onChange={() => void toggleVeille('veilleYoutube', 'La source YouTube')} />
+            </div>
+            <div style={rowStyle}>
+              <div>
+                <strong>Flux RSS personnalisés</strong>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+                  Sites de presse, blogs et concurrents que vous surveillez manuellement.
+                </p>
+                {rssFeeds.length
+                  ? <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>{rssFeeds.map(feed => <div key={feed.id} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}><strong style={{ fontWeight: 500 }}>{feed.name}</strong><span style={{ color: 'var(--muted, #9aa9b5)', fontSize: 12 }}>{feed.url}</span><Button onClick={() => edit('sources', feed)}>Modifier</Button><Button onClick={() => void remove(feed)}>Supprimer</Button></div>)}</div>
+                  : <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>Aucun flux enregistré.</p>}
+                <p style={{ margin: '8px 0 0', color: 'var(--muted, #9aa9b5)' }}>{sourceStatusLine('rss')}</p>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+                <Button variant="primary" icon="plus" onClick={() => edit('sources', undefined, { name: 'Nouveau flux RSS', platform: 'rss', url: 'https://', category: 'web', status: 'connected', active: true })}>Ajouter un flux RSS</Button>
+                <Toggle checked={veilleEnabled.rss} label="Flux RSS" disabled={searchBusy} onChange={() => void toggleVeille('veilleRss', 'Les flux RSS')} />
+              </div>
+            </div>
+            <div style={{ ...rowStyle, borderBottom: 'none' }}>
+              <div>
+                <strong>Reddit</strong>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+                  Discussions publiques mentionnant vos mots-clés.
+                </p>
+                <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{sourceStatusLine('reddit')}</p>
+              </div>
+              <Toggle checked={veilleEnabled.reddit} label="Reddit" disabled={searchBusy} onChange={() => void toggleVeille('veilleReddit', 'La source Reddit')} />
+            </div>
+          </Panel>
+          <Panel title="Mots-clés surveillés" icon="tag" action={<Button variant="primary" icon="plus" onClick={() => edit('keywords')}>Ajouter un mot-clé</Button>}>
+            {data.keywords.length ? data.keywords.map(keyword => <div key={keyword.id} style={rowStyle}><div><strong>{keyword.term || keyword.name}</strong><p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{(keyword.platforms || []).join(' · ') || 'Toutes les plateformes'}</p></div><div style={{ display: 'flex', gap: 8 }}><Button onClick={() => edit('keywords', keyword)}>Modifier</Button><Button onClick={() => void remove(keyword)}>Supprimer</Button></div></div>) : <p>Aucun mot-clé n’est encore surveillé.</p>}
+          </Panel>
+        </div>}
         {activeTab === 'subscription' && <Panel title="Votre abonnement" icon="crown">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', paddingBottom: 16 }}><h2 style={{ margin: 0, textTransform: 'capitalize' }}>{subscription?.plan || subscription?.name || 'Pro'}</h2><Badge status={subscription?.status || 'active'}>{subscription?.status === 'active' ? 'Actif' : subscription?.status || 'Actif'}</Badge></div>
           <div style={sectionStyle}><div style={rowStyle}><span>Tarif mensuel</span><strong>{Number(subscription?.price || 250000).toLocaleString('fr-FR')} {subscription?.currency || 'FCFA'} / mois</strong></div><div style={rowStyle}><span>Prochaine facturation</span><strong>{subscription?.billingDate ? new Date(String(subscription.billingDate)).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'À confirmer'}</strong></div></div>

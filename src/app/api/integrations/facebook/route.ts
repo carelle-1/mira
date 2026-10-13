@@ -34,14 +34,17 @@ export async function GET(request: Request) {
         accountName: platformAccounts.accountName,
         active: platformAccounts.active,
         expiresAt: platformAccounts.expiresAt,
+        refreshToken: platformAccounts.refreshToken,
       }).from(platformAccounts).where(and(
         eq(platformAccounts.userId, user.id),
         eq(platformAccounts.platform, 'facebook'),
       ));
-      const pages = accounts.map(({ accountId, accountName, active, expiresAt }) => ({
+      const pages = accounts.map(({ accountId, accountName, active, expiresAt, refreshToken }) => ({
         accountId,
         accountName,
         active: active && (!expiresAt || expiresAt.getTime() > Date.now()),
+        // true = jeton utilisateur disponible (recherche publique autorisée)
+        userToken: Boolean(refreshToken),
       }));
       return NextResponse.json({
         connected: pages.some(page => page.active),

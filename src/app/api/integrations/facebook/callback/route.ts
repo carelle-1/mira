@@ -435,8 +435,10 @@ export async function GET(request: Request) {
         account => account.accountId === page.id,
       );
 
-      // /me/accounts fournit ici un jeton de Page.
-      // Ne pas enregistrer le jeton utilisateur à sa place.
+      // accessToken = jeton de Page (lecture du flux de CETTE Page).
+      // refreshToken = jeton utilisateur longue durée, conservé pour la
+      // recherche de Pages publiques et la lecture du contenu public des
+      // Pages que l'utilisateur n'administre pas (Pages Search API).
       const pageToken = page.access_token;
 
       if (existing) {
@@ -445,7 +447,7 @@ export async function GET(request: Request) {
           .set({
             accountName: page.name,
             accessToken: pageToken,
-            refreshToken: null,
+            refreshToken: userToken,
             expiresAt: null,
             active: index === 0,
             updatedAt: now,
@@ -458,6 +460,7 @@ export async function GET(request: Request) {
           accountId: page.id,
           accountName: page.name,
           accessToken: pageToken,
+          refreshToken: userToken,
           expiresAt: null,
           active: index === 0,
         });
@@ -490,12 +493,12 @@ export async function GET(request: Request) {
     console.error(
       'Facebook OAuth callback failed:',
       error instanceof Error ? error.message : 'Unknown error',
-    );
+   );
 
-    return redirectToSettings(
+    return redirectToSettings( 
       request,
       'error',
-      'facebook_callback_failed',
+      'facebook_callback_failed',                                                                     
     );
   }
 }

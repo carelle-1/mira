@@ -6,7 +6,7 @@ import { getUser, sameOrigin } from '@/lib/auth';
 import { resourceTypes, type Entity, type ResourceType } from '@/lib/types';
 
 export type ResourceContext = { params: Promise<{ type: string; id?: string }> };
-const allowedFields = new Set(['name', 'description', 'status', 'platform', 'category', 'sentiment', 'score', 'count', 'growth', 'author', 'date', 'time', 'url', 'email', 'phone', 'role', 'company', 'country', 'city', 'languages', 'domain', 'severity', 'assignee', 'views', 'likes', 'comments', 'image', 'notes', 'progress', 'active', 'emailAlerts', 'pushAlerts', 'digest', 'sensitiveData', 'timezone', 'theme', 'dateFormat', 'weeklyReport', 'criticalOnly', 'icon', 'lastScan', 'term', 'platforms']);
+const allowedFields = new Set(['name', 'description', 'status', 'platform', 'category', 'sentiment', 'score', 'count', 'growth', 'author', 'date', 'time', 'url', 'email', 'phone', 'role', 'company', 'country', 'city', 'languages', 'domain', 'severity', 'assignee', 'views', 'likes', 'comments', 'image', 'notes', 'progress', 'active', 'emailAlerts', 'pushAlerts', 'digest', 'sensitiveData', 'timezone', 'theme', 'dateFormat', 'weeklyReport', 'criticalOnly', 'icon', 'lastScan', 'term', 'platforms', 'facebookPublicSearch', 'veilleFacebook', 'veilleGoogleNews', 'veilleYoutube', 'veilleReddit', 'veilleRss', 'veilleNewsLang', 'veilleNewsCountry']);
 export async function handleResource(request: Request, context: ResourceContext) {
   try {
     if (request.method !== 'GET' && !sameOrigin(request)) return NextResponse.json({ error: 'Origine non autorisée.' }, { status: 403 });

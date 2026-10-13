@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '@/db';
 import { resources, users } from '@/db/schema';
 import { getUser, hashPassword, sameOrigin, verifyPassword } from '@/lib/auth';
@@ -17,6 +17,30 @@ export async function POST(request: Request, context: { params: Promise<{ action
       if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) return NextResponse.json({ error: 'Choisissez un mot de passe de 8 à 128 caractères.' }, { status: 400 });
       await db.update(users).set({ passwordHash: hashPassword(body.password) }).where(eq(users.id, user.id));
       return NextResponse.json({ success: true });
+    }
+    if (action === 'delete_mentions') {
+      // Suppression groupée : avec { ids: [...] } seules les mentions listées
+      // sont supprimées, sans identifiants toutes les mentions le sont.
+      let body: { ids?: unknown } = {};
+      try {
+        body = await request.json();
+      } catch {
+        body = {};
+      }
+      const ids = Array.isArray(body.ids)
+        ? body.ids.filter((id): id is string => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id))
+        : [];
+
+      const scope = and(
+        eq(resources.userId, user.id),
+        eq(resources.type, 'mentions'),
+        ids.length ? inArray(resources.id, ids) : undefined,
+      );
+
+      const [count] = await db.select({ total: sql<number>`COUNT(*)` }).from(resources).where(scope);
+      const deleted = Number(count?.total ?? 0);
+      if (deleted > 0) await db.delete(resources).where(scope);
+      return NextResponse.json({ success: true, deleted });
     }
     if (action === 'analyze') {
       const data = await loadWorkspace(user.id);
