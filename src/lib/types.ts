@@ -32,6 +32,30 @@ export interface Entity {
   image?: string;
   notes?: string;
   progress?: number;
+  metrics?: { views?: number; comments?: number; likes?: number; shares?: number };
+  metricsUpdatedAt?: string;
+  /** Motif du dernier échec de publication. */
+  publishError?: string;
+  // Score de réputation (analyse Ollama + calcul déterministe)
+  scoreLevel?: 'faible' | 'moyen' | 'eleve';
+  scoreStatus?: 'en_attente' | 'provisoire' | 'final' | 'echec';
+  scoreBreakdown?: {
+    components: { key: string; label: string; value: number; weight: number; contribution: number; detail?: string }[];
+    weights: Record<string, number>;
+    provisional: boolean;
+    capApplied?: string;
+  };
+  sentimentAnalyse?: string;
+  sentimentScore?: number;
+  pertinence?: number;
+  gravite?: number;
+  themes?: string[];
+  scoreReason?: string;
+  scoredAt?: string;
+  scoreModel?: string;
+  scoreTextHash?: string;
+  ollamaModel?: string;
+  scoreWeights?: Record<string, number>;
   active?: boolean;
   emailAlerts?: boolean;
   pushAlerts?: boolean;
@@ -51,7 +75,7 @@ export interface Entity {
   lastFacebookScanWarning?: string;
   term?: string;
   platforms?: string[];
-  [key: string]: string | number | boolean | string[] | undefined;
+  [key: string]: string | number | boolean | string[] | { views?: number; comments?: number; likes?: number; shares?: number } | { components: unknown[]; weights: Record<string, number>; provisional: boolean; capApplied?: string } | undefined;
 }
 export type WorkspaceData = Record<ResourceType, Entity[]>;
 export interface AppUser { id: string; name: string; email: string; demo: boolean; }

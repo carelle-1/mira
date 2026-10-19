@@ -8,6 +8,9 @@ import { createGoogleNewsSource } from './google-news';
 import { createRedditSource } from './reddit';
 import { createRssSource } from './rss';
 import { createYouTubeSource } from './youtube';
+import { refreshMentionMetrics } from './metrics-refresh';
+import { hasMetrics } from './metrics';
+import { loadBrandName, SCHEDULED_BATCH_SIZE, scorePendingMentions } from '../score/queue';
 import { matchedKeyword, normalizeUrl } from './text';
 import type { MentionSource, NormalizedMention, SearchOptions, SourceRunStats } from './types';
 
@@ -47,6 +50,11 @@ export interface VeilleSweepResult {
   skipped: number;
   errors: string[];
   checkedAt: string;
+  /** Mentions dont les métriques d'engagement ont été rafraîchies. */
+  metricsUpdated: number;
+  /** Candidats au rafraîchissement des métriques (diagnostic). */
+  metricsCandidates: number;
+  metricsError?: string;
 }
 
 /** Utilisateurs dont une collecte est en cours (verrou anti-chevauchement). */
@@ -164,9 +172,16 @@ async function saveVeilleStatuses(userId: string, stats: SourceRunStats[], check
     const fields: Record<string, string | number> = { veilleLastScanAt: checkedAt };
 
     for (const stat of stats) {
-      if (stat.skipped) continue;
-      fields[`veilleLastAt_${stat.sourceId}`] = stat.error ? '' : checkedAt;
-      fields[`veilleError_${stat.sourceId}`] = stat.error ?? '';
+      // Une source désactivée ou non configurée est une information, pas une
+      // erreur : son motif est enregistré pour affichage dans les paramètres.
+      if (stat.error) {
+        fields[`veilleError_${stat.sourceId}`] = stat.error;
+      } else if (stat.skipped) {
+        fields[`veilleError_${stat.sourceId}`] = stat.skipped;
+      } else {
+        fields[`veilleLastAt_${stat.sourceId}`] = checkedAt;
+        fields[`veilleError_${stat.sourceId}`] = '';
+      }
     }
 
     // Compatibilité avec l'onglet Mots-clés (statut historique Facebook).
@@ -261,8 +276,9 @@ export async function runVeilleForUser(
         configured = false;
       }
       if (!configured) {
-        console.info(`[veille] source=${source.id} : non configurée (clé API manquante), source ignorée.`);
-        stats.push({ sourceId: source.id, label: source.label, found: 0, added: 0, known: 0, checked: 0, skipped: 'non configurée', durationMs: 0 });
+        const reason = source.unavailableReason?.() ?? 'non configurée';
+        console.info(`[veille] source=${source.id} : ${reason}, source ignorée.`);
+        stats.push({ sourceId: source.id, label: source.label, found: 0, added: 0, known: 0, checked: 0, skipped: reason, durationMs: 0 });
         continue;
       }
 
@@ -331,10 +347,12 @@ export async function runVeilleForUser(
             date: parsed.toISOString(),
             time: parsed.toLocaleString('fr-FR'),
             url: mention.url,
-            sentiment: 'neutral' as const,
-            score: 50,
             status: 'new' as const,
             externalId: mention.externalId || `${source.id}:${normalizeUrl(mention.url)}`,
+            // Le score est attribué par la file d'analyse (`src/lib/score`).
+            scoreStatus: 'en_attente' as const,
+            ...(hasMetrics(mention.metrics) ? { metrics: mention.metrics } : {}),
+            ...(mention.metricsUpdatedAt ? { metricsUpdatedAt: mention.metricsUpdatedAt } : {}),
           },
         };
       });
@@ -375,11 +393,11 @@ export async function runScheduledVeille(): Promise<VeilleSweepResult> {
 
   if (sweepInFlight) {
     console.info('[veille] Balayage déjà en cours, passe ignorée.');
-    return { users: 0, scanned: 0, added: 0, skipped: 1, errors: [], checkedAt };
+    return { users: 0, scanned: 0, added: 0, skipped: 1, errors: [], checkedAt, metricsUpdated: 0, metricsCandidates: 0 };
   }
   sweepInFlight = true;
 
-  const result: VeilleSweepResult = { users: 0, scanned: 0, added: 0, skipped: 0, errors: [], checkedAt };
+  const result: VeilleSweepResult = { users: 0, scanned: 0, added: 0, skipped: 0, errors: [], checkedAt, metricsUpdated: 0, metricsCandidates: 0 };
 
   try {
     const allUsers = await db.select({ id: users.id }).from(users);
@@ -396,6 +414,28 @@ export async function runScheduledVeille(): Promise<VeilleSweepResult> {
         result.added += run.added;
         for (const stat of run.sources) {
           if (stat.error) result.errors.push(`${user.id.slice(0, 8)}/${stat.sourceId} : ${stat.error}`);
+        }
+        // Rafraîchissement des métriques d'engagement (quotas respectés).
+        const metrics = await refreshMentionMetrics(user.id);
+        result.metricsUpdated += metrics.updated;
+        result.metricsCandidates += metrics.candidates;
+        if (metrics.error) result.metricsError = metrics.error;
+        // Analyse sémantique des mentions en attente (bornée, jamais bloquante).
+        try {
+          const [scoreKeywords, brandName] = await Promise.all([
+            loadActiveKeywords(user.id),
+            loadBrandName(user.id),
+          ]);
+          const scores = await scorePendingMentions(user.id, {
+            keywords: scoreKeywords,
+            brandName,
+            limit: SCHEDULED_BATCH_SIZE,
+          });
+          if (scores.candidates > 0) {
+            console.info(`[score] cycle planifié : ${scores.analyzed} analysée(s), ${scores.provisional} provisoire(s), ${scores.pending} encore en attente.`);
+          }
+        } catch (error) {
+          console.info(`[score] cycle d'analyse ignoré : ${errorMessage(error)}`);
         }
       } catch (error) {
         result.errors.push(`${user.id.slice(0, 8)} : ${errorMessage(error)}`);

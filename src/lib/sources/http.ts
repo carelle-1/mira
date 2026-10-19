@@ -36,11 +36,14 @@ export interface PolicyResult<T> {
   ok: boolean;
   data?: T;
   error?: string;
+  /** En-têtes de limitation de débit renvoyés par l'API (X-Ratelimit-*). */
+  rateLimit?: { remaining?: number; resetSeconds?: number; used?: number };
 }
 
 /**
  * GET avec délai maximal, une nouvelle tentative en cas d'échec réseau ou
- * d'erreur 5xx, et réponse limitée en taille.
+ * d'erreur 5xx, et réponse limitée en taille. Les en-têtes X-Ratelimit sont
+ * exposés pour permettre le respect des quotas.
  */
 export async function fetchWithPolicy<T = unknown>(
   url: string,
@@ -49,39 +52,45 @@ export async function fetchWithPolicy<T = unknown>(
     minDelayMs?: number;
     rateLimitKey?: string;
     retries?: number;
+    method?: 'GET' | 'POST' | 'DELETE';
+    body?: string;
+    timeoutMs?: number;
   } = {},
 ): Promise<PolicyResult<T>> {
-  const { headers = {}, minDelayMs = 0, rateLimitKey = new URL(url).host, retries = 1 } = options;
+  const { headers = {}, minDelayMs = 0, rateLimitKey = new URL(url).host, retries = 1, method = 'GET', body, timeoutMs = REQUEST_TIMEOUT_MS } = options;
   if (minDelayMs > 0) await rateLimit(rateLimitKey, minDelayMs);
 
   let lastError = '';
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, {
+        method,
         headers: { 'User-Agent': USER_AGENT, ...headers },
+        body,
         signal: controller.signal,
         cache: 'no-store',
       });
-      const body = await response.text();
-      if (body.length > MAX_RESPONSE_BYTES) {
-        return { ok: false, error: `Réponse trop volumineuse (${Math.round(body.length / 1024)} Ko).` };
+      const raw = await response.text();
+      if (raw.length > MAX_RESPONSE_BYTES) {
+        return { ok: false, error: `Réponse trop volumineuse (${Math.round(raw.length / 1024)} Ko).` };
       }
+      const rateLimit = readRateLimitHeaders(response.headers);
       if (!response.ok) {
         lastError = `HTTP ${response.status}`;
         if (response.status >= 500 && attempt < retries) continue;
-        return { ok: false, error: lastError };
+        return { ok: false, error: lastError, rateLimit };
       }
       try {
-        return { ok: true, data: JSON.parse(body) as T };
+        return { ok: true, data: JSON.parse(raw) as T, rateLimit };
       } catch {
-        return { ok: true, data: body as unknown as T };
+        return { ok: true, data: raw as unknown as T, rateLimit };
       }
     } catch (error) {
       lastError = error instanceof Error
-        ? (error.name === 'AbortError' ? `délai dépassé (${REQUEST_TIMEOUT_MS / 1000} s)` : error.message)
+        ? (error.name === 'AbortError' ? `délai dépassé (${timeoutMs / 1000} s)` : error.message)
         : 'erreur réseau inconnue';
       if (attempt >= retries) return { ok: false, error: lastError };
     } finally {
@@ -90,6 +99,18 @@ export async function fetchWithPolicy<T = unknown>(
   }
 
   return { ok: false, error: lastError || 'échec inconnu' };
+}
+
+/** Lit les en-têtes de limitation de débit d'une réponse HTTP. */
+function readRateLimitHeaders(headers: Headers) {
+  const remaining = Number(headers.get('x-ratelimit-remaining'));
+  const resetSeconds = Number(headers.get('x-ratelimit-reset'));
+  const used = Number(headers.get('x-ratelimit-used'));
+  return {
+    remaining: Number.isFinite(remaining) ? remaining : undefined,
+    resetSeconds: Number.isFinite(resetSeconds) ? resetSeconds : undefined,
+    used: Number.isFinite(used) ? used : undefined,
+  };
 }
 
 /** Variante renvoyant le texte brut (XML, HTML). */

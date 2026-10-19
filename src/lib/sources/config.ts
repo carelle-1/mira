@@ -89,7 +89,8 @@ export async function loadVeilleConfig(userId: string): Promise<VeilleConfig> {
       facebook: { enabled: data.veilleFacebook !== false },
       'google-news': { enabled: data.veilleGoogleNews !== false },
       youtube: { enabled: data.veilleYoutube !== false },
-      reddit: { enabled: data.veilleReddit !== false },
+      // Reddit est désactivé par défaut : l'utilisateur l'active explicitement.
+      reddit: { enabled: data.veilleReddit === true },
       rss: { enabled: data.veilleRss !== false },
     },
     language: typeof data.veilleNewsLang === 'string' && data.veilleNewsLang.trim()

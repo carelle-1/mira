@@ -7,3 +7,7 @@ node_modules/
 *.tsbuildinfo
 playwright-report/
 test-results/
+
+# Fichiers uploadés par les utilisateurs
+public/uploads/
+

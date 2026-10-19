@@ -2,6 +2,8 @@
 import { useState, type ReactNode } from 'react';
 import { demoData, platformNames } from '@/lib/demo-data';
 import { formatNumber } from '@/lib/types';
+import { compactNumber } from '@/lib/sources/metrics';
+import { scoreLevelLabels, scoreLevelOf } from '@/lib/score/scoring.config';
 import { useWorkspace } from '../workspace-context';
 import { Avatar, Badge, Button, EmptyState, Icon, IconButton, Panel, PlatformIcon, Select, TextLink } from '../ui';
 import { ChartPanel, Donut, ScoreBreakdown, SentimentPanel } from '../charts';
@@ -15,11 +17,70 @@ export function MentionMetrics({ last = 'score', compact = false }: { last?: 'sc
   const positive = 1742 + data.mentions.filter(m => m.sentiment === 'positive').length - demoData.mentions.filter(m => m.sentiment === 'positive').length;
   const neutral = 512 + data.mentions.filter(m => m.sentiment === 'neutral').length - demoData.mentions.filter(m => m.sentiment === 'neutral').length;
   const negative = 233 + data.mentions.filter(m => m.sentiment === 'negative').length - demoData.mentions.filter(m => m.sentiment === 'negative').length;
-  return <div className={`metric-grid ${compact ? 'metrics-compact' : ''}`}><StatCard title="Mentions totales" value={formatNumber(total)} icon="message" tone="blue" change={<><Icon name="up" size={13} />18,5%</>} subtitle="vs. semaine précédente" /><StatCard title="Mentions positives" value={formatNumber(positive)} icon="smile" change={`${(positive / Math.max(1,total) * 100).toFixed(1).replace('.',',')}%`} /><StatCard title="Mentions neutres" value={formatNumber(neutral)} icon="neutral" tone="blue" change={`${(neutral / Math.max(1,total) * 100).toFixed(1).replace('.',',')}%`} /><StatCard title="Mentions négatives" value={formatNumber(negative)} icon="frown" tone="red" change={`${(negative / Math.max(1,total) * 100).toFixed(1).replace('.',',')}%`} />{last === 'score' ? <StatCard title="Score global" value={<><span>78</span><em>/100</em><b className="inline-trend"><Icon name="up" size={12} />6,3%</b></>} icon="trend" subtitle="vs. mois précédent" /> : last === 'engagement' ? <StatCard title="Taux d’engagement" value="12,7%" icon="trend" change={<><Icon name="up" size={13} />+3,2%</>} /> : <StatCard title="Niveau de risque" value={<span className="text-green risk-low">FAIBLE</span>} icon="shield"><div className="risk-meter"><i /></div></StatCard>}</div>;
+
+  // Totaux d'engagement : seules les mentions disposant de métriques sont comptées.
+  const withViews = data.mentions.filter(m => typeof m.metrics?.views === 'number');
+  const withComments = data.mentions.filter(m => typeof m.metrics?.comments === 'number');
+  const totalViews = withViews.reduce((sum, m) => sum + (m.metrics?.views ?? 0), 0);
+  const totalComments = withComments.reduce((sum, m) => sum + (m.metrics?.comments ?? 0), 0);
+  return <div className={`metric-grid ${compact ? 'metrics-compact' : ''}`}><StatCard title="Mentions totales" value={formatNumber(total)} icon="message" tone="blue" change={<><Icon name="up" size={13} />18,5%</>} subtitle="vs. semaine précédente" /><StatCard title="Mentions positives" value={formatNumber(positive)} icon="smile" change={`${(positive / Math.max(1,total) * 100).toFixed(1).replace('.',',')}%`} /><StatCard title="Mentions neutres" value={formatNumber(neutral)} icon="neutral" tone="blue" change={`${(neutral / Math.max(1,total) * 100).toFixed(1).replace('.',',')}%`} /><StatCard title="Mentions négatives" value={formatNumber(negative)} icon="frown" tone="red" change={`${(negative / Math.max(1,total) * 100).toFixed(1).replace('.',',')}%`} />{last === 'score' ? <StatCard title="Score global" value={<><span>78</span><em>/100</em><b className="inline-trend"><Icon name="up" size={12} />6,3%</b></>} icon="trend" subtitle="vs. mois précédent" /> : last === 'engagement' ? <StatCard title="Vues cumulées" value={formatNumber(totalViews)} icon="eye" tone="blue" subtitle={`${formatNumber(totalComments)} commentaires · ${formatNumber(withViews.length)} mention(s) mesurée(s)`} /> : <StatCard title="Niveau de risque" value={<span className="text-green risk-low">FAIBLE</span>} icon="shield"><div className="risk-meter"><i /></div></StatCard>}</div>;
 }
-export function MiniMentions({ limit = 5, className = '' }: { limit?: number; className?: string }) {
-  const { data, detail, edit, navigate } = useWorkspace();
-  return <Panel title="Dernières mentions" icon="success" action={<TextLink onClick={() => navigate('mentions')} />} className={`mini-mentions ${className}`}><div className="mini-mention-list">{data.mentions.length ? data.mentions.slice(0, limit).map(mention => <div className="mini-mention-row" key={mention.id} role="button" tabIndex={0} onClick={() => detail(mention)} onKeyDown={e => { if (e.key === 'Enter') detail(mention); }}><div className="mini-source"><PlatformIcon platform={mention.platform} size="small" /><span><strong>{platformNames[mention.platform || 'web']}</strong><small>{mention.author}</small></span></div><p>{mention.name}</p><Badge status={mention.sentiment} /><div className="mini-mention-time"><span>{mention.time}</span><small><Icon name="eye" size={11} />{mention.views}</small></div><IconButton name="more" label="Modifier la mention" onClick={e => { e.stopPropagation(); edit('mentions', mention); }} /></div>) : <EmptyState title="Aucune mention" message="Les nouvelles mentions apparaîtront ici." icon="message" />}</div></Panel>;
+/** Résumé des scores de réputation : moyenne et répartitions. */
+export function ScoreSummary() {
+  const { data } = useWorkspace();
+
+  const scored = data.mentions.filter(m => typeof m.score === 'number');
+  const average = scored.length
+    ? Math.round(scored.reduce((sum, m) => sum + (m.score ?? 0), 0) / scored.length)
+    : 0;
+
+  const byLevel = (['eleve', 'moyen', 'faible'] as const).map(level => ({
+    level,
+    label: scoreLevelLabels[level],
+    count: scored.filter(m => m.scoreLevel === level).length,
+  }));
+
+  const bySentiment = (['negatif', 'neutre', 'positif'] as const).map(sentiment => ({
+    sentiment,
+    count: data.mentions.filter(m => (m.sentimentAnalyse ?? m.sentiment) === sentiment).length,
+  }));
+
+  const averageLevel = scoreLevelOf(average);
+
+  return (
+    <Panel title="Score de réputation" icon="trend">
+      <div className="score-summary">
+        <div className="score-summary-average">
+          <strong>{average}</strong>
+          <span>/ 100</span>
+          <Badge status={averageLevel.level === 'eleve' ? 'negative' : averageLevel.level === 'moyen' ? 'neutral' : 'positive'}>
+            {averageLevel.label}
+          </Badge>
+          <small>{scored.length} mention(s) analysée(s)</small>
+        </div>
+        <div className="score-summary-rows">
+          {byLevel.map(entry => (
+            <div key={entry.level} className="score-summary-row">
+              <span>{entry.label}</span>
+              <div className="score-summary-bar"><i style={{ width: `${scored.length ? (entry.count / scored.length) * 100 : 0}%` }} /></div>
+              <strong>{entry.count}</strong>
+            </div>
+          ))}
+          {bySentiment.map(entry => (
+            <div key={entry.sentiment} className="score-summary-row">
+              <span>{entry.sentiment}</span>
+              <div className="score-summary-bar"><i style={{ width: `${data.mentions.length ? (entry.count / data.mentions.length) * 100 : 0}%` }} /></div>
+              <strong>{entry.count}</strong>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+export function MiniMentions({ limit = 5, className = '' }: { limit?: number; className?: string }) {  const { data, detail, edit, navigate } = useWorkspace();
+  return <Panel title="Dernières mentions" icon="success" action={<TextLink onClick={() => navigate('mentions')} />} className={`mini-mentions ${className}`}><div className="mini-mention-list">{data.mentions.length ? data.mentions.slice(0, limit).map(mention => <div className="mini-mention-row" key={mention.id} role="button" tabIndex={0} onClick={() => detail(mention)} onKeyDown={e => { if (e.key === 'Enter') detail(mention); }}><div className="mini-source"><PlatformIcon platform={mention.platform} size="small" /><span><strong>{platformNames[mention.platform || 'web']}</strong><small>{mention.author}</small></span></div><p>{mention.name}</p><Badge status={mention.sentiment} /><div className="mini-mention-time"><span>{mention.time}</span><small><Icon name="eye" size={11} />{compactNumber(mention.metrics?.views)}</small></div><IconButton name="more" label="Modifier la mention" onClick={e => { e.stopPropagation(); edit('mentions', mention); }} /></div>) : <EmptyState title="Aucune mention" message="Les nouvelles mentions apparaîtront ici." icon="message" />}</div></Panel>;
 }
 export function DashboardView() {
   const { data, navigate, detail, save, notify } = useWorkspace();

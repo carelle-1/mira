@@ -69,7 +69,10 @@ export async function GET(request: Request) {
         response_type: 'code',
         // scope: 'pages_show_list,pages_read_engagement',
         
-        scope: 'pages_show_list,pages_read_engagement,pages_read_user_content',
+        // `pages_manage_posts` est nécessaire pour publier sur la Page depuis
+        // l'espace Contenus. Il est optionnel : sans lui, la lecture fonctionne
+        // et la publication renvoie un message clair.
+        scope: 'pages_show_list,pages_read_engagement,pages_read_user_content,pages_manage_posts',
         auth_type: 'rerequest',
         state,
       }).toString();

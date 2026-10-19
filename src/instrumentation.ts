@@ -27,6 +27,19 @@ export async function register() {
     } catch (error) {
       console.error('Veille multi-sources : passe planifiée échouée :', error instanceof Error ? error.message : 'Unknown error');
     }
+
+    // Publications programmées dont l'heure est atteinte.
+    try {
+      const { processDuePublications } = await import('@/lib/publishing/scheduler');
+      const { db } = await import('@/db');
+      const { users } = await import('@/db/schema');
+      const allUsers = await db.select({ id: users.id }).from(users);
+      for (const user of allUsers) {
+        await processDuePublications(user.id);
+      }
+    } catch (error) {
+      console.error('Publications programmées : cycle échoué :', error instanceof Error ? error.message : 'Unknown error');
+    }
   };
 
   const bootTimer = setTimeout(() => {

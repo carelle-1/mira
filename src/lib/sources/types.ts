@@ -4,6 +4,10 @@
  * journalise. L'échec d'une source n'interrompt jamais les autres.
  */
 
+import type { MentionMetrics } from './metrics';
+
+export type { MentionMetrics };
+
 export interface NormalizedMention {
   /** Titre ou contenu principal de la mention. */
   title: string;
@@ -17,6 +21,10 @@ export interface NormalizedMention {
   sourceId: string;
   /** Identifiant externe stable (ex. `facebook:<id de publication>`). */
   externalId?: string;
+  /** Métriques d'engagement (Youtube et Page Facebook uniquement). */
+  metrics?: MentionMetrics;
+  /** Date de dernière mise à jour des métriques (ISO). */
+  metricsUpdatedAt?: string;
   /** Auteur ou média, si connu. */
   author?: string;
   /** Langue détectée ou déclarée (fr, en…). */
@@ -47,6 +55,11 @@ export interface MentionSource {
   platform: string;
   /** La source est-elle utilisable (clé API, compte connecté, option active) ? */
   isConfigured(): boolean | Promise<boolean>;
+  /**
+   * Motif d'indisponibilité affiché à l'utilisateur quand `isConfigured()`
+   * est faux (ex. « Reddit nécessite des identifiants API… »).
+   */
+  unavailableReason?(): string;
   /**
    * Mots-clés toujours recherchés par la source en plus de ceux de
    * l'utilisateur (ex. le nom de la Page Facebook connectée).

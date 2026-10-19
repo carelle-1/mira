@@ -1,8 +1,9 @@
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/db';
 import { platformAccounts } from '@/db/schema';
+import { mapFacebookCommentMetrics, mapFacebookMetrics, hasMetrics } from './metrics';
 import { matchedKeyword, normalizeUrl } from './text';
-import type { MentionSource, NormalizedMention, SearchOptions } from './types';
+import type { MentionSource, MentionMetrics, NormalizedMention, SearchOptions } from './types';
 
 export const MAX_TOTAL_PAGES = 8;
 const POSTS_LIMIT = 25;
@@ -106,10 +107,12 @@ async function collectFromEdge(
   matched: Map<string, NormalizedMention>,
   budget: { remaining: number },
   warnings: string[],
+  ownPostIds: string[],
 ): Promise<number> {
   const fields = [
-    'id', 'message', 'created_time', 'permalink_url', 'from',
-    'comments.limit(50){id,message,created_time,permalink_url,from}',
+    'id', 'message', 'created_time', 'permalink_url', 'from{id,name}', 'shares',
+    'comments.limit(50).summary(true){id,message,created_time,permalink_url,from}',
+    'reactions.limit(0).summary(true)',
   ].join(',');
 
   let nextUrl: URL | null = new URL(`${graphBaseUrl()}/${page.id}/${edge}`);
@@ -143,10 +146,19 @@ async function collectFromEdge(
         message?: string;
         created_time?: string;
         permalink_url?: string;
-        from?: { name?: string };
-        comments?: { data?: CommentRef[] };
+        from?: { id?: string; name?: string };
+        shares?: { count?: unknown };
+        comments?: { summary?: { total_count?: unknown } } & { data?: CommentRef[] };
+        reactions?: { summary?: { total_count?: unknown } };
       };
 
+      // Publications rédigées par la Page elle-même : seules à disposer
+      // éventuellement des Insights (permission read_insights).
+      const isOwnPost = post.from?.id === page.id;
+      if (isOwnPost) ownPostIds.push(post.id);
+
+      const metrics = mapFacebookMetrics(post);
+      const hasPostMetrics = hasMetrics(metrics);
       matched.set(post.id, {
         title: (typeof post.message === 'string' ? post.message.trim().slice(0, 1000) : '') || '(publication sans texte)',
         excerpt: '',
@@ -157,7 +169,9 @@ async function collectFromEdge(
         sourceId: 'facebook',
         externalId: `facebook:${post.id}`,
         author: post.from?.name || 'Auteur Facebook non communiqué',
-        raw: { edge, pageId: page.id },
+        metrics: hasPostMetrics ? metrics : undefined,
+        metricsUpdatedAt: hasPostMetrics ? new Date().toISOString() : undefined,
+        raw: { edge, pageId: page.id, own: isOwnPost },
       });
 
       for (const comment of post.comments?.data || []) {
@@ -172,6 +186,8 @@ async function collectFromEdge(
           sourceId: 'facebook',
           externalId: `facebook:${comment.id}`,
           author: comment.from?.name || 'Auteur Facebook non communiqué',
+          // Compteur de commentaires hérité de la publication parente.
+          metrics: mapFacebookCommentMetrics(hasMetrics(metrics) ? metrics : undefined),
           raw: { edge, pageId: page.id, comment: true },
         });
       }
@@ -228,16 +244,34 @@ async function collectFacebookContent(userId: string): Promise<FacebookContent> 
   const matched = new Map<string, NormalizedMention>();
   const warnings: string[] = [];
   const budget = { remaining: 600 };
+  const ownPostIds: string[] = [];
   let postsChecked = 0;
 
   for (const page of pages.slice(0, MAX_TOTAL_PAGES)) {
     for (const edge of ['feed', 'tagged', 'visitor_posts'] as const) {
       try {
-        postsChecked += await collectFromEdge(page, edge, pages, matched, budget, warnings);
+        postsChecked += await collectFromEdge(page, edge, pages, matched, budget, warnings, ownPostIds);
       } catch (error) {
         warnings.push(`${page.name} (${edge}) : ${error instanceof Error ? error.message : 'lecture impossible.'}`);
       }
       await new Promise(resolve => setTimeout(resolve, GRAPH_DELAY_MS));
+    }
+  }
+
+  // Vues des publications de la Page via les Insights (uniquement si la
+  // permission read_insights est accordée ; sinon le champ reste vide).
+  if (ownPostIds.length) {
+    try {
+      const views = await fetchFacebookPostViews(ownPostIds, pages[0]?.token ?? '', userToken);
+      const updatedAt = new Date().toISOString();
+      for (const [postId, count] of views) {
+        const mention = matched.get(postId);
+        if (!mention) continue;
+        mention.metrics = { ...mention.metrics, views: count };
+        mention.metricsUpdatedAt = updatedAt;
+      }
+    } catch {
+      // Les Insights sont optionnels : un échec n'interrompt jamais la collecte.
     }
   }
 
@@ -248,6 +282,115 @@ async function collectFacebookContent(userId: string): Promise<FacebookContent> 
     postsChecked,
     warnings,
   };
+}
+
+/** Disponibilité des Insights : `null` = pas encore testé, mis en cache par processus. */
+let insightsAvailable: boolean | null = null;
+let insightsDeniedLogged = false;
+
+/**
+ * Vérifie une seule fois si la permission `read_insights` est accordée.
+ * Un refus n'est journalisé qu'une fois et ne produit aucun avertissement
+ * répété dans les résultats de collecte.
+ */
+async function checkInsightsPermission(userToken: string): Promise<boolean> {
+  if (insightsAvailable !== null) return insightsAvailable;
+
+  const url = new URL(`${graphBaseUrl()}/me/permissions`);
+  const result = await graphFetch(url, userToken);
+  if (!result.ok || !Array.isArray(result.data.data)) {
+    insightsAvailable = false;
+    return false;
+  }
+
+  const granted = (result.data.data as { permission?: string; status?: string }[])
+    .some(entry => entry.permission === 'read_insights' && entry.status === 'granted');
+  insightsAvailable = granted;
+
+  if (!granted && !insightsDeniedLogged) {
+    insightsDeniedLogged = true;
+    console.info('[veille] source=facebook : permission read_insights absente — les vues des publications ne seront pas renseignées (commentaires, réactions et partages restent collectés).');
+  }
+  return granted;
+}
+
+/**
+ * Lit les vues (impressions) de publications via les Insights, une par une et
+ * dans la limite de 25 publications par passe. Les publications sans Insights
+ * laissent `views` vide. (L'interrogation par lots `?ids=` est dépréciée par
+ * Meta depuis la version 26 de l'API Graph.)
+ */
+export async function fetchFacebookPostViews(postIds: string[], pageToken: string, userToken?: string): Promise<Map<string, number>> {
+  const views = new Map<string, number>();
+  if (!postIds.length || !userToken) return views;
+  if (!(await checkInsightsPermission(userToken))) return views;
+
+  for (const postId of postIds.slice(0, 25)) {
+    const url = new URL(`${graphBaseUrl()}/${postId}/insights`);
+    url.searchParams.set('metric', 'post_impressions');
+
+    const result = await graphFetch(url, pageToken);
+    if (!result.ok || !isRecord(result.data) || !Array.isArray(result.data.data)) continue;
+
+    for (const entry of result.data.data) {
+      if (!isRecord(entry) || entry.name !== 'post_impressions') continue;
+      const values = entry.values;
+      const first = Array.isArray(values) && isRecord(values[0]) ? values[0] : undefined;
+      const value = first?.value;
+      const count = typeof value === 'number' ? value : Number(value);
+      if (Number.isFinite(count) && count >= 0) views.set(postId, Math.round(count));
+    }
+    await new Promise(resolve => setTimeout(resolve, GRAPH_DELAY_MS));
+  }
+
+  return views;
+}
+
+/**
+ * Relit le contenu des Pages administrées pour obtenir les métriques à jour
+ * (commentaires, réactions, partages) de toutes les publications récentes.
+ * Une seule requête paginée couvre des centaines de publications. La table est
+ * indexée par identifiant complet ET par dernier segment numérique (celui qui
+ * figure dans les permaliens), car les identifiants de publication sont de la
+ * forme « {page}_{post} ».
+ */
+export async function fetchFacebookPageMetrics(userId: string): Promise<Map<string, MentionMetrics>> {
+  const metrics = new Map<string, MentionMetrics>();
+  const accounts = await loadAccounts(userId);
+  if (!accounts.length) {
+    console.info('[veille] source=facebook : aucune Page enregistrée, métriques non rafraîchies.');
+    return metrics;
+  }
+
+  for (const page of accounts.slice(0, MAX_TOTAL_PAGES)) {
+    for (const edge of ['feed', 'tagged'] as const) {
+      let nextUrl: URL | null = new URL(`${graphBaseUrl()}/${page.id}/${edge}`);
+      nextUrl.searchParams.set('fields', 'id,shares,comments.limit(0).summary(true),reactions.limit(0).summary(true)');
+      nextUrl.searchParams.set('limit', '100');
+      const host = nextUrl.host;
+
+      for (let step = 0; nextUrl && step < 5; step++) {
+        const result = await graphFetch(nextUrl, page.accessToken);
+        if (!result.ok || !Array.isArray(result.data.data)) break;
+
+        for (const item of result.data.data) {
+          if (!isRecord(item) || typeof item.id !== 'string') continue;
+          const mapped = mapFacebookMetrics(item as { comments?: { summary?: { total_count?: unknown } }; reactions?: { summary?: { total_count?: unknown } }; shares?: { count?: unknown } });
+          if (!hasMetrics(mapped)) continue;
+          metrics.set(item.id, mapped);
+          const lastSegment = item.id.split('_').pop();
+          if (lastSegment) metrics.set(lastSegment, mapped);
+        }
+
+        const paging = isRecord(result.data.paging) ? result.data.paging : undefined;
+        const next = paging && typeof paging.next === 'string' ? new URL(paging.next) : null;
+        nextUrl = next && next.host === host && next.protocol === 'https:' ? next : null;
+        await new Promise(resolve => setTimeout(resolve, GRAPH_DELAY_MS));
+      }
+    }
+  }
+
+  return metrics;
 }
 
 async function getCachedContent(userId: string): Promise<FacebookContent> {

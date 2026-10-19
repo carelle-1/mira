@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'next/navigation';
@@ -39,6 +39,135 @@ interface SecurityInfo {
   twoFactorEnabled: boolean;
   demo: boolean;
   sessions: SecuritySession[];
+}
+
+/** État d'Ollama renvoyé par l'API d'analyse. */
+interface OllamaState {
+  ollama?: { available: boolean; models: string[]; model?: string; error?: string };
+  pending?: number;
+  inactiveKeyword?: number;
+}
+
+/** Panneau de configuration de l'analyse sémantique (Ollama). */
+function ScorePanel({ busy }: { busy: boolean }) {
+  const { data, notify, save } = useWorkspace();
+  const preferences = data.settings[0];
+  const [state, setState] = useState<OllamaState | null>(null);
+  const weights = (preferences?.scoreWeights ?? {}) as Record<string, number>;
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch('/api/mentions/score', { cache: 'no-store' });
+      if (response.ok) setState((await response.json()) as OllamaState);
+    } catch {
+      setState(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Chargement différé : la vérification d'Ollama ne doit pas bloquer le rendu.
+    const timer = window.setTimeout(() => void load(), 150);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+
+  const updateWeight = async (key: string, value: number) => {
+    const settingsRow = data.settings[0];
+    try {
+      await save('settings', { name: settingsRow?.name || 'Préférences du compte', scoreWeights: { ...weights, [key]: value } }, settingsRow?.id);
+      notify(`Pondération « ${key} » réglée sur ${Math.round(value * 100)} %.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Impossible d’enregistrer la pondération.', true);
+    }
+  };
+
+  const weightLabels: Record<string, string> = {
+    sentiment: 'Sentiment',
+    gravite: 'Gravité',
+    pertinence: 'Pertinence',
+    portee: 'Portée / engagement',
+    autorite: 'Autorité de la source',
+    fraicheur: 'Fraîcheur',
+  };
+  const defaults: Record<string, number> = { sentiment: 0.3, gravite: 0.2, pertinence: 0.15, portee: 0.2, autorite: 0.1, fraicheur: 0.05 };
+  const totalWeight = Object.values(weightLabels).reduce((sum, label, index) => {
+    const key = Object.keys(weightLabels)[index];
+    return sum + (weights[key] ?? defaults[key]);
+  }, 0);
+
+  return (
+    <Panel title="Analyse sémantique (Ollama)" icon="brain">
+      <div style={rowStyle}>
+        <div>
+          <strong>État du service</strong>
+          <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+            {!state
+              ? 'Vérification de la connexion à Ollama…'
+              : state.ollama?.available
+                ? `Connecté — modèle actif : ${state.ollama.model ?? 'aucun'}.`
+                : `Ollama injoignable : ${state.ollama?.error ?? 'service hors ligne'}. Les mentions reçoivent un score provisoire.`}
+          </p>
+          <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+            {typeof state?.pending === 'number'
+              ? `${state.pending} mention(s) en attente d’analyse${state.inactiveKeyword ? ` · ${state.inactiveKeyword} hors veille (mot-clé désactivé, recalculables via « Tout recalculer »)` : ''}.`
+              : 'Nombre de mentions en attente inconnu.'}
+          </p>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Badge status={state?.ollama?.available ? 'positive' : 'neutral'}>{state?.ollama?.available ? 'Connecté' : 'Hors ligne'}</Badge>
+          <Button icon="refresh" busy={busy} onClick={() => void load()}>Vérifier</Button>
+        </div>
+      </div>
+      {state?.ollama?.available && state.ollama.models.length > 0 && (
+        <div style={rowStyle}>
+          <div>
+            <strong>Modèle utilisé</strong>
+            <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
+              Modèles détectés sur votre machine : {state.ollama.models.join(', ')}.
+            </p>
+          </div>
+          <Select
+            aria-label="Modèle Ollama"
+            value={state.ollama.model}
+            onChange={async event => {
+              try {
+                await save('settings', { name: data.settings[0]?.name || 'Préférences du compte', ollamaModel: event.target.value }, data.settings[0]?.id);
+                notify(`Modèle Ollama réglé sur ${event.target.value}. Il sera utilisé à la prochaine analyse.`);
+                await load();
+              } catch (error) {
+                notify(error instanceof Error ? error.message : 'Impossible de changer de modèle.', true);
+              }
+            }}
+          >
+            {state.ollama.models.map(model => <option key={model} value={model}>{model}</option>)}
+          </Select>
+        </div>
+      )}
+      <div style={{ ...rowStyle, borderBottom: 'none', display: 'block' }}>
+        <strong>Pondérations du score</strong>
+        <p style={{ margin: '5px 0 15px', color: 'var(--muted, #9aa9b5)' }}>
+          Total actuel : {Math.round(totalWeight * 100)} % — la somme devrait rester proche de 100 %. Le score mesure l’importance d’une mention pour votre réputation.
+        </p>
+        {Object.entries(weightLabels).map(([key, label]) => {
+          const value = weights[key] ?? defaults[key];
+          return (
+            <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              <span style={{ minWidth: '10rem' }}>{label}</span>
+              <input
+                type="range"
+                min={0}
+                max={50}
+                step={1}
+                value={Math.round(value * 100)}
+                onChange={event => void updateWeight(key, Number(event.target.value) / 100)}
+                aria-label={`Pondération ${label}`}
+              />
+              <strong style={{ minWidth: '3rem', textAlign: 'right' }}>{Math.round(value * 100)} %</strong>
+            </label>
+          );
+        })}
+      </div>
+    </Panel>
+  );
 }
 
 const tabs: { id: SettingsTab; label: string; icon: string }[] = [
@@ -85,11 +214,14 @@ export function SettingsView() {
   const rssFeeds = data.sources.filter(source => source.platform === 'rss');
   const sourceStatusLine = (sourceId: string) => {
     const last = preferences?.[`veilleLastAt_${sourceId}`];
-    const error = preferences?.[`veilleError_${sourceId}`];
+    const status = preferences?.[`veilleError_${sourceId}`];
     const label = typeof last === 'string' && last
       ? `Dernière collecte : ${new Date(last).toLocaleString('fr-FR')}`
       : 'Aucune collecte effectuée pour le moment.';
-    return typeof error === 'string' && error ? `${label} — erreur : ${error}` : label;
+    if (typeof status === 'string' && status) {
+      return last ? `${label} — ${status}` : status;
+    }
+    return label;
   };
   const [accountEdits, setAccountEdits] = useState<Partial<{ name: string; email: string; phone: string; city: string }>>({});
   const account = { name: accountEdits.name ?? profile?.name ?? user.name, email: accountEdits.email ?? profile?.email ?? user.email, phone: accountEdits.phone ?? profile?.phone ?? '', city: accountEdits.city ?? profile?.city ?? '' };
@@ -515,7 +647,7 @@ async function launchVeille() {
               <div>
                 <strong>Reddit</strong>
                 <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>
-                  Discussions publiques mentionnant vos mots-clés.
+                  Discussions publiques mentionnant vos mots-clés. Désactivée par défaut : nécessite les identifiants API Reddit (REDDIT_CLIENT_ID et REDDIT_CLIENT_SECRET) dans le fichier .env.
                 </p>
                 <p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{sourceStatusLine('reddit')}</p>
               </div>
@@ -525,10 +657,11 @@ async function launchVeille() {
           <Panel title="Mots-clés surveillés" icon="tag" action={<Button variant="primary" icon="plus" onClick={() => edit('keywords')}>Ajouter un mot-clé</Button>}>
             {data.keywords.length ? data.keywords.map(keyword => <div key={keyword.id} style={rowStyle}><div><strong>{keyword.term || keyword.name}</strong><p style={{ margin: '5px 0 0', color: 'var(--muted, #9aa9b5)' }}>{(keyword.platforms || []).join(' · ') || 'Toutes les plateformes'}</p></div><div style={{ display: 'flex', gap: 8 }}><Button onClick={() => edit('keywords', keyword)}>Modifier</Button><Button onClick={() => void remove(keyword)}>Supprimer</Button></div></div>) : <p>Aucun mot-clé n’est encore surveillé.</p>}
           </Panel>
+          <ScorePanel busy={searchBusy} />
         </div>}
         {activeTab === 'subscription' && <Panel title="Votre abonnement" icon="crown">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', paddingBottom: 16 }}><h2 style={{ margin: 0, textTransform: 'capitalize' }}>{subscription?.plan || subscription?.name || 'Pro'}</h2><Badge status={subscription?.status || 'active'}>{subscription?.status === 'active' ? 'Actif' : subscription?.status || 'Actif'}</Badge></div>
-          <div style={sectionStyle}><div style={rowStyle}><span>Tarif mensuel</span><strong>{Number(subscription?.price || 250000).toLocaleString('fr-FR')} {subscription?.currency || 'FCFA'} / mois</strong></div><div style={rowStyle}><span>Prochaine facturation</span><strong>{subscription?.billingDate ? new Date(String(subscription.billingDate)).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'À confirmer'}</strong></div></div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', paddingBottom: 16 }}><h2 style={{ margin: 0, textTransform: 'capitalize' }}>{String(subscription?.plan || subscription?.name || 'Pro')}</h2><Badge status={subscription?.status || 'active'}>{subscription?.status === 'active' ? 'Actif' : String(subscription?.status || 'Actif')}</Badge></div>
+          <div style={sectionStyle}><div style={rowStyle}><span>Tarif mensuel</span><strong>{Number(subscription?.price || 250000).toLocaleString('fr-FR')} {String(subscription?.currency || 'FCFA')} / mois</strong></div><div style={rowStyle}><span>Prochaine facturation</span><strong>{subscription?.billingDate ? new Date(String(subscription.billingDate)).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'À confirmer'}</strong></div></div>
           <div style={{ paddingTop: 18 }}><Button variant="primary" icon="arrow" onClick={() => navigate('premium')}>Voir les offres et changer de plan</Button></div>
         </Panel>}
 

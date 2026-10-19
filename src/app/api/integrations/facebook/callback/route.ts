@@ -14,6 +14,9 @@ const REQUIRED_PERMISSIONS = [
   'pages_read_user_content',
 ] as const;
 
+/** Permissions facultatives : demandées pour publier, absentes = lecture seule. */
+const OPTIONAL_PERMISSIONS = ['pages_manage_posts'] as const;
+
 type GraphError = {
   message?: string;
   type?: string;
@@ -308,6 +311,12 @@ export async function GET(request: Request) {
         'error',
         'facebook_permission_missing',
       );
+    }
+
+    // La permission de publication est facultative : sans elle la lecture
+    // fonctionne et l'espace Contenus l'explique à l'utilisateur.
+    if (!grantedPermissions.includes('pages_manage_posts')) {
+      console.info('Facebook pages_manage_posts non accordée : publication désactivée, lecture seule.');
     }
 
     // 4. Récupérer les Pages et leurs jetons d'accès.

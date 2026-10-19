@@ -30,7 +30,65 @@
 
 
 
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
+
+/** Vrai si l'URL pointe vers une vidéo. */
+function isVideoMedia(value: string) {
+  return /\.(mp4|webm|mov)(\?|#|$)/i.test(value) || value.startsWith('data:video/');
+}
+
+/**
+ * Champ d'envoi de média (image ou vidéo) pour un contenu.
+ * Le fichier est envoyé à /api/publications/media qui renvoie son URL.
+ */
+function MediaField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function handleFile(file: File | undefined) {
+    if (!file) return;
+    setUploading(true);
+    setError('');
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const response = await fetch('/api/publications/media', { method: 'POST', body: form });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'L’envoi du fichier a échoué.');
+      onChange(result.url || '');
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'L’envoi du fichier a échoué.');
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = '';
+    }
+  }
+
+  return (
+    <div className="media-field">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"
+        disabled={uploading}
+        aria-label="Image ou vidéo du contenu"
+        onChange={event => void handleFile(event.target.files?.[0])}
+      />
+      {uploading ? <small>Envoi du fichier en cours…</small> : null}
+      {error ? <small className="media-field-error">{error}</small> : null}
+      {value && !uploading ? <div className="media-field-preview">
+        {isVideoMedia(value)
+          ? <video src={value} controls preload="metadata" />
+          : <img src={value} alt="Aperçu du média" />}
+        <div className="media-field-actions">
+          <Button type="button" className="button-sm" onClick={() => inputRef.current?.click()}>Remplacer</Button>
+          <Button type="button" variant="danger-ghost" className="button-sm" icon="delete" onClick={() => onChange('')}>Retirer</Button>
+        </div>
+      </div> : !uploading ? <small className="form-hint">JPG, PNG, WebP ou GIF (5 Mo max) — MP4, WebM ou MOV (50 Mo max).</small> : null}
+    </div>
+  );
+}
 
 
 
@@ -295,12 +353,16 @@ const defaults: Record<ResourceType, Partial<Entity>> = {
 };
 
 const statuses: [string, string][] = [['draft', 'Brouillon'], ['scheduled', 'Programmé'], ['published', 'Publié'], ['archived', 'Archivée']];
+/** Le statut « Publié » reste disponible : si le contenu n'a pas encore été
+ *  diffusé sur les réseaux, la carte affiche un avertissement « Non diffusé »
+ *  et propose le bouton « Publier maintenant ». */
+const publicationStatuses: [string, string][] = statuses;
 
 const fields: Record<ResourceType, Field[]> = {
   sources: [{ key: 'name', label: 'Nom de la source', required: true }, { key: 'platform', label: 'Plateforme', options: platforms }, { key: 'url', label: 'Adresse URL', type: 'url', required: true, full: true }, { key: 'category', label: 'Catégorie', options: [['social', 'Réseaux sociaux'], ['media', 'Médias & News'], ['search', 'Moteurs de recherche'], ['web', 'Sites web'], ['other', 'Autres']] }, { key: 'status', label: 'État de la connexion', options: [['connected', 'Connectée'], ['partial', 'Partiellement connectée'], ['inactive', 'Déconnectée']] }, { key: 'description', label: 'Description', type: 'textarea', full: true }],
   mentions: [{ key: 'name', label: 'Contenu de la mention', required: true, type: 'textarea', full: true }, { key: 'platform', label: 'Source', options: platforms }, { key: 'author', label: 'Auteur / Canal', required: true }, { key: 'sentiment', label: 'Sentiment', options: [['positive', 'Positif'], ['neutral', 'Neutre'], ['negative', 'Négatif']] }, { key: 'score', label: 'Score (0 à 100)', type: 'number' }, { key: 'category', label: 'Sujet' }, { key: 'url', label: 'Lien vers la mention', type: 'url' }],
   alerts: [{ key: 'name', label: 'Titre de l’alerte', required: true, full: true }, { key: 'description', label: 'Description', type: 'textarea', full: true }, { key: 'severity', label: 'Sévérité', options: [['critical', 'Critique'], ['high', 'Élevée'], ['medium', 'Moyenne'], ['low', 'Basse'], ['info', 'Information']] }, { key: 'status', label: 'Statut', options: [['unread', 'Non lue'], ['in_progress', 'En cours'], ['resolved', 'Résolue'], ['archived', 'Archivée']] }, { key: 'platform', label: 'Source', options: platforms }, { key: 'assignee', label: 'Assigné à' }],
-  publications: [{ key: 'name', label: 'Titre du contenu', required: true, full: true }, { key: 'description', label: 'Description', type: 'textarea', full: true }, { key: 'platform', label: 'Plateforme', options: platforms }, { key: 'status', label: 'Statut', options: statuses }, { key: 'date', label: 'Date de publication', type: 'datetime-local' }, { key: 'url', label: 'Lien', type: 'url' }],
+  publications: [{ key: 'name', label: 'Titre du contenu', required: true, full: true }, { key: 'description', label: 'Description', type: 'textarea', full: true }, { key: 'platform', label: 'Plateforme', options: platforms }, { key: 'status', label: 'Statut', options: publicationStatuses }, { key: 'date', label: 'Date de publication', type: 'datetime-local' }, { key: 'image', label: 'Image ou vidéo', type: 'media', full: true }, { key: 'url', label: 'Lien', type: 'url' }],
   contacts: [{ key: 'name', label: 'Nom', required: true }, { key: 'role', label: 'Rôle' }, { key: 'company', label: 'Organisation' }, { key: 'email', label: 'Email', type: 'email' }, { key: 'phone', label: 'Téléphone', type: 'tel' }],
   reports: [{ key: 'name', label: 'Nom du rapport', required: true }, { key: 'category', label: 'Catégorie' }, { key: 'status', label: 'Statut', options: statuses }, { key: 'score', label: 'Score', type: 'number' }, { key: 'description', label: 'Description', type: 'textarea', full: true }],
   rules: [{ key: 'name', label: 'Nom de la règle', required: true, full: true }, { key: 'category', label: 'Déclencheur', options: [['sentiment', 'Sentiment négatif'], ['volume', 'Volume de mentions'], ['identity', 'Usurpation d’identité']] }, { key: 'severity', label: 'Sévérité', options: [['critical', 'Critique'], ['high', 'Élevée'], ['medium', 'Moyenne'], ['low', 'Basse']] }, { key: 'description', label: 'Conditions et seuil de déclenchement', type: 'textarea', required: true, full: true }, { key: 'active', label: 'Activer cette règle', type: 'checkbox', full: true }],
@@ -930,7 +992,7 @@ const fields: Record<ResourceType, Field[]> = {
 
 
 
-  return <form onSubmit={submit}><p className="form-intro">{entity ? 'Mettez à jour les informations ci-dessous.' : 'Renseignez les informations pour ajouter cet élément à votre espace.'}</p><div className="form-grid">{(((fields as any)[effectiveType]||[])||[]).map((field: Field) => <label className={`form-field ${field.full ? 'full' : ''} ${field.type === 'checkbox' ? 'checkbox-field' : ''}`} key={field.key}><span>{field.label}{field.type === 'multiselect' && <small> (Ctrl/Cmd + clic pour plusieurs choix)</small>}{field.required && <em> *</em>}</span>{field.type === 'checkbox' ? <Toggle label={field.label} checked={Boolean(form[field.key])} onChange={() => update(field.key, !form[field.key])} /> : field.options ? <Select className={field.type === 'multiselect' ? 'multi-select-wrap' : ''} multiple={field.type === 'multiselect'} size={field.type === 'multiselect' ? Math.min(field.options.length, 5) : undefined} value={field.type === 'multiselect' ? selectedValues(form[field.key]) : String(form[field.key] ?? (field.options&&field.options[0]&&field.options[0][0]))} onChange={e => update(field.key, field.type === 'multiselect' ? Array.from(e.currentTarget.selectedOptions, option => option.value) : e.target.value)}>{(field.options||[]).map(([value,label]) => <option value={value} key={value}>{label}</option>)}</Select> : field.type === 'textarea' ? <textarea rows={effectiveType === 'profile' || effectiveType === 'reports' ? 6 : 4} required={field.required} value={String(form[field.key] ?? '')} onChange={e => update(field.key, e.target.value)} placeholder={field.label} minLength={field.required ? 2 : undefined} /> : <input type={field.type || 'text'} value={String(form[field.key] ?? '').slice(0, field.type === 'datetime-local' ? 16 : field.type === 'date' ? 10 : undefined)} onChange={e => update(field.key, field.type === 'number' ? Number(e.target.value) : e.target.value)} required={field.required} minLength={field.required && !field.type ? 2 : undefined} min={field.type === 'number' ? 0 : undefined} max={field.key === 'score' || field.key === 'progress' ? 100 : undefined} placeholder={field.type === 'url' ? 'https://' : field.label} />}</label>)}</div>{error && <div className="form-error"><Icon name="alert" />{error}</div>}<div className="modal-footer">{entity && effectiveType !== 'profile' && effectiveType !== 'settings' && <Button variant="danger-ghost" icon="delete" type="button" onClick={() => openModal({ kind: 'delete', entity })}>Supprimer</Button>}<span className="spacer" /><Button type="button" onClick={closeModal}>Annuler</Button><Button type="submit" variant="primary" icon="check" busy={busy}>{entity ? 'Enregistrer' : 'Créer'}</Button></div></form>;
+  return <form onSubmit={submit}><p className="form-intro">{entity ? 'Mettez à jour les informations ci-dessous.' : 'Renseignez les informations pour ajouter cet élément à votre espace.'}</p><div className="form-grid">{(((fields as any)[effectiveType]||[])||[]).map((field: Field) => <label className={`form-field ${field.full ? 'full' : ''} ${field.type === 'checkbox' ? 'checkbox-field' : ''}`} key={field.key}><span>{field.label}{field.type === 'multiselect' && <small> (Ctrl/Cmd + clic pour plusieurs choix)</small>}{field.required && <em> *</em>}</span>{field.type === 'checkbox' ? <Toggle label={field.label} checked={Boolean(form[field.key])} onChange={() => update(field.key, !form[field.key])} /> : field.options ? <Select className={field.type === 'multiselect' ? 'multi-select-wrap' : ''} multiple={field.type === 'multiselect'} size={field.type === 'multiselect' ? Math.min(field.options.length, 5) : undefined} value={field.type === 'multiselect' ? selectedValues(form[field.key]) : String(form[field.key] ?? (field.options&&field.options[0]&&field.options[0][0]))} onChange={e => update(field.key, field.type === 'multiselect' ? Array.from(e.currentTarget.selectedOptions, option => option.value) : e.target.value)}>{(field.options||[]).map(([value,label]) => <option value={value} key={value}>{label}</option>)}</Select> : field.type === 'media' ? <MediaField value={String(form[field.key] ?? '')} onChange={value => update(field.key, value)} /> : field.type === 'textarea' ? <textarea rows={effectiveType === 'profile' || effectiveType === 'reports' ? 6 : 4} required={field.required} value={String(form[field.key] ?? '')} onChange={e => update(field.key, e.target.value)} placeholder={field.label} minLength={field.required ? 2 : undefined} /> : <input type={field.type || 'text'} value={String(form[field.key] ?? '').slice(0, field.type === 'datetime-local' ? 16 : field.type === 'date' ? 10 : undefined)} onChange={e => update(field.key, field.type === 'number' ? Number(e.target.value) : e.target.value)} required={field.required} minLength={field.required && !field.type ? 2 : undefined} min={field.type === 'number' ? 0 : undefined} max={field.key === 'score' || field.key === 'progress' ? 100 : undefined} placeholder={field.type === 'url' ? 'https://' : field.label} />}</label>)}</div>{error && <div className="form-error"><Icon name="alert" />{error}</div>}<div className="modal-footer">{entity && effectiveType !== 'profile' && effectiveType !== 'settings' && <Button variant="danger-ghost" icon="delete" type="button" onClick={() => openModal({ kind: 'delete', entity })}>Supprimer</Button>}<span className="spacer" /><Button type="button" onClick={closeModal}>Annuler</Button><Button type="submit" variant="primary" icon="check" busy={busy}>{entity ? 'Enregistrer' : 'Créer'}</Button></div></form>;
 
 
 
@@ -2002,6 +2064,11 @@ export function GlobalDialogs() {
           </div>
         </div>
         {entity.description && <p className={`detail-description ${entity.effectiveType === 'reports' ? 'report-content' : ''}`}>{entity.description}</p>}
+        {entity.effectiveType === 'publications' && entity.image ? <div className="detail-media">
+          {isVideoMedia(String(entity.image))
+            ? <video src={String(entity.image)} controls preload="metadata" />
+            : <img src={String(entity.image)} alt={entity.name || 'Média du contenu'} />}
+        </div> : null}
         <dl className="detail-metadata">
           {[
             ['Auteur', entity.author],

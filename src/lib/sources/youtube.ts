@@ -1,45 +1,104 @@
 import { fetchWithPolicy } from './http';
 import { isSourceDue } from './config';
+import { mapYouTubeStatistics, type MentionMetrics } from './metrics';
 import type { MentionSource, NormalizedMention, SearchOptions } from './types';
 
-/** Quota quotidien de recherches, en unités : 1 recherche = 100 unités. */
-const MAX_SEARCHES_PER_DAY = 20;
+/** Quota quotidien, en unités : 1 recherche = 100 unités, 1 vidéo lue = 1 unité. */
+const MAX_DAILY_QUOTA_UNITS = 9_000;
 const SEARCH_CACHE_MS = 60 * 60_000;
 const MAX_RESULTS = 5;
-
-interface YouTubeItem {
-  id?: { videoId?: string };
-  snippet?: {
-    title?: string;
-    description?: string;
-    publishedAt?: string;
-    channelTitle?: string;
-    liveBroadcastContent?: string;
-  };
-}
-
-interface YouTubeResponse {
-  items?: YouTubeItem[];
-}
+const STATISTICS_BATCH = 50;
 
 interface SearchResponse {
   items?: {
     id?: { videoId?: string };
-    snippet?: YouTubeItem['snippet'];
+    snippet?: {
+      title?: string;
+      description?: string;
+      publishedAt?: string;
+      channelTitle?: string;
+    };
   }[];
 }
 
-/** Nombre de recherches effectuées aujourd'hui (remis à zéro au changement de jour). */
+interface StatisticsResponse {
+  items?: unknown[];
+}
+
+/** Unités consommées aujourd'hui (remises à zéro au changement de jour). */
 let budgetDay = new Date().toISOString().slice(0, 10);
-let searchesToday = 0;
+let quotaUsedToday = 0;
 const searchCache = new Map<string, { at: number; mentions: NormalizedMention[] }>();
 
 function resetBudgetIfNeeded() {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== budgetDay) {
     budgetDay = today;
-    searchesToday = 0;
+    quotaUsedToday = 0;
   }
+}
+
+function quotaExceeded(): boolean {
+  return quotaUsedToday >= MAX_DAILY_QUOTA_UNITS;
+}
+
+/**
+ * Lit les statistiques (vues, likes, commentaires) de vidéos par lots de 50
+ * identifiants maximum. Chaque appel consomme 1 unité de quota.
+ */
+export async function fetchYouTubeStatistics(videoIds: string[]) {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) return new Map<string, MentionMetrics>();
+
+  const statistics = new Map<string, MentionMetrics>();
+  const ids = [...new Set(videoIds.filter(Boolean))];
+
+  resetBudgetIfNeeded();
+
+  for (let index = 0; index < ids.length; index += STATISTICS_BATCH) {
+    if (quotaExceeded()) {
+      console.info(`[veille] source=youtube : quota journalier atteint (${Math.round(quotaUsedToday)}/${MAX_DAILY_QUOTA_UNITS} unités), statistiques partielles.`);
+      break;
+    }
+
+    const batch = ids.slice(index, index + STATISTICS_BATCH);
+    const url = new URL('https://www.googleapis.com/youtube/v3/videos');
+    url.searchParams.set('part', 'statistics');
+    url.searchParams.set('id', batch.join(','));
+    url.searchParams.set('key', key);
+
+    try {
+      const result = await fetchWithPolicy<StatisticsResponse>(url.toString(), { minDelayMs: 350 });
+      quotaUsedToday += 1; // videos.list = 1 unité
+      if (result.ok && result.data) {
+        for (const [videoId, metrics] of mapYouTubeStatistics(result.data.items)) {
+          statistics.set(videoId, metrics);
+        }
+      }
+    } catch {
+      // Une erreur de statistiques ne doit jamais interrompre la collecte.
+    }
+  }
+
+  return statistics;
+}
+
+/** Complète des mentions avec leurs statistiques YouTube. */
+async function attachStatistics(mentions: NormalizedMention[]): Promise<NormalizedMention[]> {
+  const videoIds = mentions
+    .map(mention => (typeof mention.raw?.videoId === 'string' ? mention.raw.videoId : null))
+    .filter((id): id is string => Boolean(id));
+
+  if (!videoIds.length) return mentions;
+
+  const statistics = await fetchYouTubeStatistics(videoIds);
+  const updatedAt = new Date().toISOString();
+
+  return mentions.map(mention => {
+    const videoId = typeof mention.raw?.videoId === 'string' ? mention.raw.videoId : undefined;
+    const metrics = videoId ? statistics.get(videoId) : undefined;
+    return metrics ? { ...mention, metrics, metricsUpdatedAt: updatedAt } : mention;
+  });
 }
 
 /**
@@ -58,8 +117,8 @@ export function createYouTubeSource(): MentionSource {
       if (!key) throw new Error('YOUTUBE_API_KEY absente : source YouTube ignorée.');
 
       resetBudgetIfNeeded();
-      if (searchesToday >= MAX_SEARCHES_PER_DAY) {
-        console.info(`[veille] source=youtube mot-clé="${keyword}" : quota quotidien atteint (${MAX_SEARCHES_PER_DAY} recherches), passe ignorée.`);
+      if (quotaExceeded()) {
+        console.info(`[veille] source=youtube : quota journalier atteint (${Math.round(quotaUsedToday)}/${MAX_DAILY_QUOTA_UNITS} unités), passe ignorée.`);
         return [];
       }
 
@@ -81,7 +140,7 @@ export function createYouTubeSource(): MentionSource {
         throw new Error(`API YouTube indisponible (${result.error ?? 'réponse vide'})`);
       }
 
-      searchesToday += 1;
+      quotaUsedToday += 100; // search.list = 100 unités
       const mentions = (result.data.items || []).flatMap(item => {
         const videoId = item.id?.videoId;
         if (!videoId) return [];
@@ -98,11 +157,12 @@ export function createYouTubeSource(): MentionSource {
         }];
       }).filter(mention => mention.title);
 
-      searchCache.set(keyword, { at: Date.now(), mentions });
-      console.info(`[veille] source=youtube mot-clé="${keyword}" : ${mentions.length} vidéo(s) trouvée(s) (quota ${searchesToday}/${MAX_SEARCHES_PER_DAY})`);
-      return mentions;
+      const withStats = await attachStatistics(mentions);
+      searchCache.set(keyword, { at: Date.now(), mentions: withStats });
+      console.info(`[veille] source=youtube mot-clé="${keyword}" : ${withStats.length} vidéo(s) trouvée(s), ${withStats.filter(m => m.metrics).length} avec statistiques (quota ${Math.round(quotaUsedToday)}/${MAX_DAILY_QUOTA_UNITS} unités)`);
+      return withStats;
     },
   };
 }
 
-export type { YouTubeResponse };
+export { quotaUsedToday as youtubeQuotaUsed };
