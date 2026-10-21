@@ -125,7 +125,7 @@ function ScoreDetailModal({ mention, keywordInactive = false, onClose }: { menti
             ) : <p>Aucun détail de calcul disponible.</p>}
 
             {breakdown?.capApplied && <p className="score-detail-cap">{breakdown.capApplied}</p>}
-          </>
+          </> 
         )}
       </div>
       <div className="modal-footer">
@@ -180,7 +180,7 @@ export function MentionsView() {
         return;
       }
       scorePoll.current = setTimeout(() => void tick(), 45_000);
-    };
+    };       
 
     scorePoll.current = setTimeout(() => void tick(), 45_000);
   }, [notify, refresh]);

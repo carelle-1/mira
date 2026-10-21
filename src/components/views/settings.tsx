@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'next/navigation';
@@ -26,6 +26,16 @@ interface FacebookStatus {
   connected: boolean;
   action?: 'connect' | 'disconnect';
   accounts: FacebookPage[];
+}
+
+interface Status {
+  connected: boolean;
+  needsReconnect?: boolean;
+  action?: 'connect' | 'disconnect' | 'reconnect';
+  accountName?: string;
+  accountId?: string;
+  message?: string;
+  scopes?: string[];
 }
 
 interface SecuritySession {
@@ -194,6 +204,8 @@ export function SettingsView() {
   const [linkedinBusy, setLinkedinBusy] = useState(false);
   const [facebookStatus, setFacebookStatus] = useState<FacebookStatus>({ connected: false, action: 'connect', accounts: [] });
   const [facebookBusy, setFacebookBusy] = useState(false);
+  const [Status, setStatus] = useState<Status>({ connected: false, action: 'connect' });
+  const [Busy, setBusy] = useState(false);
   const [security, setSecurity] = useState<SecurityInfo | null>(null);
   const [securityBusy, setSecurityBusy] = useState(false);
   const [twoFactorCode, setTwoFactorCode] = useState('');
@@ -248,6 +260,17 @@ export function SettingsView() {
     }
   }, [notify]);
 
+  const loadStatus = useCallback(async () => {
+    try {
+      const response = await fetch('/api/integrations/?action=status', { cache: 'no-store' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Impossible de vérifier la connexion .');
+      setStatus(result as Status);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Impossible de vérifier la connexion .', true);
+    }
+  }, [notify]);
+
   const loadSecurity = useCallback(async () => {
     try {
       const response = await fetch('/api/security', { cache: 'no-store' });
@@ -264,10 +287,12 @@ export function SettingsView() {
       void loadLinkedinStatus();
       void loadFacebookStatus();
       void loadSecurity();
+      void loadStatus();
       const success = searchParams.get('success');
       const error = searchParams.get('error');
       if (success === 'linkedin_connected') notify('Votre compte LinkedIn est connecté.');
       if (success === 'facebook_connected') notify('Votre Page Facebook est connectée.');
+      if (success === '_connected') notify('Votre compte  est connecté.');
       if (error?.startsWith('facebook_')) {
         const message = error === 'facebook_no_pages'
           ? 'Aucune Page Facebook administrée n’a été trouvée pour ce compte.'
@@ -360,6 +385,34 @@ export function SettingsView() {
       notify(error instanceof Error ? error.message : 'Impossible de sélectionner cette Page Facebook.', true);
     } finally {
       setFacebookBusy(false);
+    }
+  }
+
+  async function Connect() {
+    setBusy(true);
+    try {
+      const response = await fetch('/api/integrations/?action=connect', { cache: 'no-store' });
+      const result = await response.json();
+      if (!response.ok || typeof result.authUrl !== 'string') throw new Error(result.error || 'Impossible de démarrer la connexion .');
+      window.location.assign(result.authUrl);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Impossible de démarrer la connexion .', true);
+      setBusy(false);
+    }
+  }
+
+  async function Disconnect() {
+    setBusy(true);
+    try {
+      const response = await fetch('/api/integrations/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'disconnect' }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Impossible de déconnecter .');
+      await loadStatus();
+      notify(result.message || 'Compte  déconnecté.');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Impossible de déconnecter .', true);
+    } finally {
+      setBusy(false);
     }
   }
 
